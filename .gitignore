@@ -1,0 +1,13 @@
+# Binarios compilados
+tp2_mpi_matmul/matmul_mpi
+*.o
+*.out
+
+# Logs de Slurm
+logs/
+slurm-*.out
+slurm-*.err
+
+# Sistema / IDE
+.DS_Store
+Thumbs.db
