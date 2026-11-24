@@ -32,6 +32,9 @@ fi
 # Tamaño de la matriz (por defecto 2048x2048; se puede pasar por argumento a sbatch)
 MATRIX_SIZE=${1:-2048}
 
+# Evitar que OpenMPI intente usar interfaces virtuales/loopback (causa típica de cuelgues)
+export OMPI_MCA_btl_tcp_if_exclude=lo,docker0
+
 echo "[INFO] Ejecutando multiplicación de matrices ${MATRIX_SIZE}x${MATRIX_SIZE}..."
 srun --mpi=pmix ./matmul_mpi "${MATRIX_SIZE}"
 

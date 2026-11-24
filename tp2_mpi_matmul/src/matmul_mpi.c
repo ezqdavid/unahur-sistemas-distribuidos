@@ -28,6 +28,7 @@
 
 #define DEFAULT_N 2048
 #define VERIFY_SAMPLES 16
+#define TILE_SIZE 64
 
 /**
  * Inicializa las matrices A y B con valores grandes deterministas.
@@ -62,9 +63,10 @@ static void build_row_distribution(int n, int size, int *sendcounts, int *displs
 }
 
 /**
- * Multiplicación local C_local = A_local * B usando orden de bucles i-k-j.
- * Recorrer B y C de forma contigua en memoria aprovecha la localidad espacial
- * y las líneas de caché L1/L2 de la arquitectura ARM64 (Cortex-A76).
+ * Multiplicación local C_local = A_local * B usando cache blocking (tiling 64x64)
+ * combinado con orden de bucles i-k-j dentro de cada bloque.
+ * Un bloque de 64x64 doubles ocupa 32 KB, por lo que cabe completo en la caché L1 (64 KB)
+ * incluso cuando N es muy grande (ej. N=6000), evitando caídas de GFLOPS por cache thrashing.
  */
 static void matmul_local_ikj(const double * restrict A_local,
                              const double * restrict B,
@@ -73,16 +75,28 @@ static void matmul_local_ikj(const double * restrict A_local,
                              int n) {
     memset(C_local, 0, (size_t)local_rows * n * sizeof(double));
 
-    for (int i = 0; i < local_rows; i++) {
-        const double *a_row = &A_local[(size_t)i * n];
-        double *c_row = &C_local[(size_t)i * n];
+    for (int ii = 0; ii < local_rows; ii += TILE_SIZE) {
+        int i_max = (ii + TILE_SIZE < local_rows) ? (ii + TILE_SIZE) : local_rows;
 
-        for (int k = 0; k < n; k++) {
-            double a_ik = a_row[k];
-            const double *b_row = &B[(size_t)k * n];
+        for (int kk = 0; kk < n; kk += TILE_SIZE) {
+            int k_max = (kk + TILE_SIZE < n) ? (kk + TILE_SIZE) : n;
 
-            for (int j = 0; j < n; j++) {
-                c_row[j] += a_ik * b_row[j];
+            for (int jj = 0; jj < n; jj += TILE_SIZE) {
+                int j_max = (jj + TILE_SIZE < n) ? (jj + TILE_SIZE) : n;
+
+                for (int i = ii; i < i_max; i++) {
+                    const double *a_row = &A_local[(size_t)i * n];
+                    double *c_row = &C_local[(size_t)i * n];
+
+                    for (int k = kk; k < k_max; k++) {
+                        double a_ik = a_row[k];
+                        const double *b_row = &B[(size_t)k * n];
+
+                        for (int j = jj; j < j_max; j++) {
+                            c_row[j] += a_ik * b_row[j];
+                        }
+                    }
+                }
             }
         }
     }
@@ -190,16 +204,30 @@ int main(int argc, char **argv) {
     }
 
     /* Sincronización previa para medir tiempos de forma justa */
+    if (rank == 0) {
+        printf("[Rank 0] Iniciando barrera y distribución (N=%d, procesos=%d)...\n", n, size);
+        fflush(stdout);
+    }
     MPI_Barrier(MPI_COMM_WORLD);
     double t_start = MPI_Wtime();
 
     /* 1. Distribución de datos (B a todos, filas de A repartidas) */
     MPI_Bcast(B, n * n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+        printf("[Rank 0] MPI_Bcast(B) completado (%.2f s). Ejecutando MPI_Scatterv(A)...\n",
+               MPI_Wtime() - t_start);
+        fflush(stdout);
+    }
     MPI_Scatterv(A, sendcounts, displs, MPI_DOUBLE,
                  A_local, local_rows * n, MPI_DOUBLE,
                  0, MPI_COMM_WORLD);
 
     double t_comp_start = MPI_Wtime();
+    if (rank == 0) {
+        printf("[Rank 0] Distribución completada (%.2f s). Iniciando cómputo local...\n",
+               t_comp_start - t_start);
+        fflush(stdout);
+    }
 
     /* 2. Cómputo paralelo local */
     if (local_rows > 0) {
@@ -218,6 +246,7 @@ int main(int argc, char **argv) {
     /* Reporte de ejecución por proceso para evidenciar distribución multi-nodo */
     printf("[Rank %d/%d @ %s] Filas procesadas: %d | Cómputo local: %.4f s\n",
            rank, size, processor_name, local_rows, t_comp_end - t_comp_start);
+    fflush(stdout);
 
     MPI_Barrier(MPI_COMM_WORLD);
 

@@ -1,0 +1,22 @@
+services:
+  nodo0:
+    build: .
+    container_name: cronos_nodo0
+    hostname: nodo0
+    volumes:
+      - ..:/workspace
+    networks:
+      - cronos_net
+
+  nodo1:
+    build: .
+    container_name: cronos_nodo1
+    hostname: nodo1
+    volumes:
+      - ..:/workspace
+    networks:
+      - cronos_net
+
+networks:
+  cronos_net:
+    driver: bridge
