@@ -259,7 +259,7 @@ static Strategy select_strategy(int n, int size, const EnvInfo *env, Strategy fo
     return STRAT_STREAM;
 }
 
-static void run_local(int n, int rank, int verify, RunStats *st) {
+static void run_local(int n, int rank, int size, const char *host, int verify, RunStats *st) {
     double t0 = MPI_Wtime();
     if (rank == 0) {
         size_t nn = (size_t)n * n;
@@ -300,9 +300,14 @@ static void run_local(int n, int rank, int verify, RunStats *st) {
     double t1 = MPI_Wtime();
     st->total_time = t1 - t0;
     st->comm_time = st->total_time - st->comp_time;
+
+    printf("[Rank %d/%d @ %s] Filas procesadas: %d | computo: %.4f s\n",
+           rank, size, host, rank == 0 ? n : 0, rank == 0 ? st->comp_time : 0.0);
+    fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
-static void run_1d(int n, int rank, int size, int verify, RunStats *st) {
+static void run_1d(int n, int rank, int size, const char *host, int verify, RunStats *st) {
     int local_rows = split_count(n, size, rank);
     size_t nn = (size_t)n * n;
     size_t loc_elems = (size_t)(local_rows > 0 ? local_rows : 1) * n;
@@ -349,6 +354,10 @@ static void run_1d(int n, int rank, int size, int verify, RunStats *st) {
     double t1 = MPI_Wtime();
 
     double local_comp = tc1 - tc0;
+    printf("[Rank %d/%d @ %s] Filas procesadas: %d | computo: %.4f s\n",
+           rank, size, host, local_rows, local_comp);
+    fflush(stdout);
+
     MPI_Reduce(&local_comp, &st->comp_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
@@ -374,9 +383,10 @@ static void run_1d(int n, int rank, int size, int verify, RunStats *st) {
     free(B);
     free(A_loc);
     free(C_loc);
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
-static void run_ring(int n, int rank, int size, int verify, RunStats *st) {
+static void run_ring(int n, int rank, int size, const char *host, int verify, RunStats *st) {
     int my_rows = split_count(n, size, rank);
     int my_row_off = split_offset(n, size, rank);
     int my_cols = split_count(n, size, rank);
@@ -445,6 +455,10 @@ static void run_ring(int n, int rank, int size, int verify, RunStats *st) {
     MPI_Barrier(MPI_COMM_WORLD);
     double t1 = MPI_Wtime();
 
+    printf("[Rank %d/%d @ %s] Filas procesadas: %d | pasos: %d | computo: %.4f s\n",
+           rank, size, host, my_rows, size, comp_acc);
+    fflush(stdout);
+
     double local_first = 0.0, local_last = 0.0;
     if (my_rows > 0 && my_row_off == 0) {
         local_first = C_loc[0];
@@ -482,9 +496,11 @@ static void run_ring(int n, int rank, int size, int verify, RunStats *st) {
     free(C_loc);
     free(B_curr);
     free(B_next);
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
-static void run_stream(int n, int rank, int size, const EnvInfo *env, int verify, RunStats *st) {
+static void run_stream(int n, int rank, int size, const char *host, const EnvInfo *env,
+                       int verify, RunStats *st) {
     int b = env->block_size;
     size_t blk_elems = (size_t)b * b;
 
@@ -501,14 +517,18 @@ static void run_stream(int n, int rank, int size, const EnvInfo *env, int verify
     double local_first = 0.0, local_last = 0.0;
     double local_err = 0.0;
     int local_ok = 1;
+    int rows_done = 0;
+    int blocks_done = 0;
 
     for (int rb = rank; rb < num_rb; rb += size) {
         int ii = rb * b;
         int mb = (ii + b <= n) ? b : (n - ii);
+        rows_done += mb;
 
         for (int cb = 0; cb < num_cb; cb++) {
             int jj = cb * b;
             int nb = (jj + b <= n) ? b : (n - jj);
+            blocks_done++;
 
             for (int kk = 0; kk < n; kk += b) {
                 int kb = (kk + b <= n) ? b : (n - kk);
@@ -557,6 +577,10 @@ static void run_stream(int n, int rank, int size, const EnvInfo *env, int verify
     MPI_Barrier(MPI_COMM_WORLD);
     double t1 = MPI_Wtime();
 
+    printf("[Rank %d/%d @ %s] Filas procesadas: %d | bloques: %d | computo: %.4f s\n",
+           rank, size, host, rows_done, blocks_done, comp_acc);
+    fflush(stdout);
+
     MPI_Reduce(&comp_acc, &st->comp_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&local_first, &st->c_first, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&local_last, &st->c_last, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -571,6 +595,7 @@ static void run_stream(int n, int rank, int size, const EnvInfo *env, int verify
     free(A_blk);
     free(B_blk);
     free(C_blk);
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
 static void execute_matmul(int n, Strategy forced, int plan_only, int verify) {
@@ -578,12 +603,23 @@ static void execute_matmul(int n, Strategy forced, int plan_only, int verify) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    char host[MPI_MAX_PROCESSOR_NAME];
+    int host_len = 0;
+    MPI_Get_processor_name(host, &host_len);
+
     EnvInfo env = inspect_env(n, rank);
     Strategy strat = select_strategy(n, size, &env, forced, rank);
 
     RunStats st = {0};
     st.verify_ok = 1;
     st.est_rank_bytes = estimate_rank_bytes(strat, n, size, &env);
+
+    const char *kernel_name =
+#ifdef USE_OPENBLAS
+        "OpenBLAS";
+#else
+        "OpenMP+Tile64";
+#endif
 
     if (plan_only) {
         if (rank == 0) {
@@ -593,23 +629,26 @@ static void execute_matmul(int n, Strategy forced, int plan_only, int verify) {
                    (double)env.min_safe_ram / (1024.0 * 1024.0),
                    strategy_name(strat),
                    (double)st.est_rank_bytes / (1024.0 * 1024.0),
-                   env.block_size,
-#ifdef USE_OPENBLAS
-                   "OpenBLAS"
-#else
-                   "OpenMP+Tile64"
-#endif
-            );
+                   env.block_size, kernel_name);
             fflush(stdout);
         }
         return;
     }
 
+    if (rank == 0) {
+        printf("[Inicio @ %s] N=%d | estrategia=%s | ranks=%d (hilos/rank=%d) | kernel=%s | "
+               "mem_est=%.1f MB / safe=%.1f MB\n",
+               host, n, strategy_name(strat), size, env.threads, kernel_name,
+               (double)st.est_rank_bytes / (1024.0 * 1024.0),
+               (double)env.min_safe_ram / (1024.0 * 1024.0));
+        fflush(stdout);
+    }
+
     switch (strat) {
-    case STRAT_LOCAL:  run_local(n, rank, verify, &st); break;
-    case STRAT_1D:     run_1d(n, rank, size, verify, &st); break;
-    case STRAT_RING:   run_ring(n, rank, size, verify, &st); break;
-    case STRAT_STREAM: run_stream(n, rank, size, &env, verify, &st); break;
+    case STRAT_LOCAL:  run_local(n, rank, size, host, verify, &st); break;
+    case STRAT_1D:     run_1d(n, rank, size, host, verify, &st); break;
+    case STRAT_RING:   run_ring(n, rank, size, host, verify, &st); break;
+    case STRAT_STREAM: run_stream(n, rank, size, host, &env, verify, &st); break;
     default: break;
     }
 
@@ -618,22 +657,20 @@ static void execute_matmul(int n, Strategy forced, int plan_only, int verify) {
         double gflops_tot = st.total_time > 0.0 ? flops / (st.total_time * 1e9) : 0.0;
         double gflops_cmp = st.comp_time > 0.0 ? flops / (st.comp_time * 1e9) : 0.0;
 
-        printf("N=%d | strategy=%s | ranks=%d (threads/rank=%d) | kernel=%s\n",
-               n, strategy_name(strat), size, env.threads,
-#ifdef USE_OPENBLAS
-               "OpenBLAS"
-#else
-               "OpenMP+Tile64"
-#endif
-        );
-        printf("mem/rank=%.1f MB (safe=%.1f MB) | total=%.4f s | comp=%.4f s | comm=%.4f s\n",
+        printf("\nResumen ejecucion (N=%d, %s, %d ranks x %d hilos, %s):\n",
+               n, strategy_name(strat), size, env.threads, kernel_name);
+        printf("  Memoria por rank     : %.1f MB (limite seguro: %.1f MB)\n",
                (double)st.est_rank_bytes / (1024.0 * 1024.0),
-               (double)env.min_safe_ram / (1024.0 * 1024.0),
-               st.total_time, st.comp_time, st.comm_time);
-        printf("GFLOPS total=%.3f | comp=%.3f | C[0][0]=%.0f | C[N-1][N-1]=%.0f\n",
-               gflops_tot, gflops_cmp, st.c_first, st.c_last);
+               (double)env.min_safe_ram / (1024.0 * 1024.0));
+        printf("  Tiempo total         : %.4f s\n", st.total_time);
+        printf("  Tiempo computo       : %.4f s (%.3f GFLOPS)\n", st.comp_time, gflops_cmp);
+        printf("  Tiempo comunicacion  : %.4f s\n", st.comm_time);
+        printf("  Rendimiento global   : %.3f GFLOPS\n", gflops_tot);
+        printf("  Muestra C[0][0]      : %.0f\n", st.c_first);
+        printf("  Muestra C[N-1][N-1]  : %.0f\n", st.c_last);
         if (verify) {
-            printf("verify=%s (max_err=%.3e)\n", st.verify_ok ? "PASS" : "FAIL", st.max_err);
+            printf("  Verificacion         : %s (error max: %.3e)\n",
+                   st.verify_ok ? "PASS" : "FAIL", st.max_err);
         }
         fflush(stdout);
     }
