@@ -1,5 +1,5 @@
 # Binarios compilados
-tp2_mpi_matmul/matmul_mpi
+matmul_mpi
 *.o
 *.out
 

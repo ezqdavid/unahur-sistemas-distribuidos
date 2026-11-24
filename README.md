@@ -5,7 +5,7 @@ Implementación paralela híbrida (**MPI + OpenMP + OpenBLAS**) para multiplicac
 ## Estructura
 
 ```text
-tp2_mpi_matmul/
+.
 ├── Makefile
 ├── README.md
 ├── src/matmul_mpi.c
@@ -28,7 +28,7 @@ make clean && make USE_OPENBLAS=0
 
 ## Ejecución en Slurm
 
-Desde `tp2_mpi_matmul/` en el directorio compartido del clúster:
+Desde la raíz del proyecto en el directorio compartido del clúster:
 
 ```bash
 sbatch slurm/matmul.sbatch
