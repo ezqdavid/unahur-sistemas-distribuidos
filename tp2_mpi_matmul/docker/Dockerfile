@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     openmpi-bin \
     libopenmpi-dev \
+    libopenblas-dev \
     openssh-server \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
